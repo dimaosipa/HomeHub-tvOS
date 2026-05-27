@@ -18,6 +18,21 @@ struct DiscoveredServer: Identifiable, Equatable, Codable, Hashable {
   static func == (lhs: DiscoveredServer, rhs: DiscoveredServer) -> Bool {
     return lhs.host == rhs.host && lhs.port == rhs.port
   }
+
+  var httpBaseURL: String {
+    var components = URLComponents()
+    components.scheme = "http"
+    components.host = host
+    components.port = port
+    guard let url = components.url else {
+      return "http://\(host):\(port)"
+    }
+    var absolute = url.absoluteString
+    if absolute.hasSuffix("/") {
+      absolute.removeLast()
+    }
+    return absolute
+  }
 }
 
 @MainActor
@@ -27,6 +42,8 @@ class HomeHubDiscovery: ObservableObject {
 
   private var browser: NWBrowser?
   private var resolveConnections: [String: NWConnection] = [:]
+  /// Maps Bonjour service identity to the last resolved host/port for exact removal.
+  private var serviceEndpoints: [String: (host: String, port: Int)] = [:]
   private let queue = DispatchQueue(label: "HomeHubDiscovery")
 
   func startDiscovery() {
@@ -34,6 +51,7 @@ class HomeHubDiscovery: ObservableObject {
 
     isDiscovering = true
     discoveredServers.removeAll()
+    serviceEndpoints.removeAll()
 
     let parameters = NWParameters.tcp
     parameters.includePeerToPeer = true
@@ -83,13 +101,17 @@ class HomeHubDiscovery: ObservableObject {
       connection.cancel()
     }
     resolveConnections.removeAll()
+    serviceEndpoints.removeAll()
   }
 
   private func handleBrowseResults(changes: Set<NWBrowser.Result.Change>) {
     for change in changes {
       switch change {
-      case .added(let result), .changed(old: _, new: let result, flags: _):
+      case .added(let result):
         handleBrowseResult(result)
+      case .changed(old: let old, new: let new, flags: _):
+        handleRemovedResult(old)
+        handleBrowseResult(new)
       case .removed(let result):
         handleRemovedResult(result)
       default:
@@ -101,13 +123,15 @@ class HomeHubDiscovery: ObservableObject {
   private func handleBrowseResult(_ result: NWBrowser.Result) {
     let parsed = parseResult(result)
 
+    let key = serviceKey(for: result.endpoint)
+
     if !parsed.host.isEmpty {
-      addOrUpdateServer(name: parsed.name, host: parsed.host, port: parsed.port)
+      addOrUpdateServer(name: parsed.name, host: parsed.host, port: parsed.port, serviceKey: key)
       return
     }
 
     if case .service = result.endpoint {
-      resolveService(result, name: parsed.name, preferredPort: parsed.port)
+      resolveService(result, name: parsed.name, preferredPort: parsed.port, serviceKey: key)
     }
   }
 
@@ -115,18 +139,26 @@ class HomeHubDiscovery: ObservableObject {
     if let key = serviceKey(for: result.endpoint) {
       resolveConnections[key]?.cancel()
       resolveConnections.removeValue(forKey: key)
+
+      if let mapped = serviceEndpoints.removeValue(forKey: key) {
+        removeServer(host: mapped.host, port: mapped.port)
+        return
+      }
     }
 
     let parsed = parseResult(result)
     if !parsed.host.isEmpty {
-      discoveredServers.removeAll { $0.host == parsed.host && $0.port == parsed.port }
-    } else if case .service(let serviceName, _, _, _) = result.endpoint {
-      discoveredServers.removeAll { $0.name == serviceName }
+      removeServer(host: parsed.host, port: parsed.port)
     }
   }
 
-  private func resolveService(_ result: NWBrowser.Result, name: String, preferredPort: Int) {
-    guard let key = serviceKey(for: result.endpoint) else { return }
+  private func resolveService(
+    _ result: NWBrowser.Result,
+    name: String,
+    preferredPort: Int,
+    serviceKey key: String?
+  ) {
+    guard let key else { return }
     guard resolveConnections[key] == nil else { return }
 
     let parameters = NWParameters.tcp
@@ -146,7 +178,7 @@ class HomeHubDiscovery: ObservableObject {
 
         Task { @MainActor in
           self?.resolveConnections.removeValue(forKey: key)
-          self?.addOrUpdateServer(name: name, host: host, port: port)
+          self?.addOrUpdateServer(name: name, host: host, port: port, serviceKey: key)
         }
 
       case .failed(let error):
@@ -197,8 +229,16 @@ class HomeHubDiscovery: ObservableObject {
     return (name, host, port)
   }
 
-  private func addOrUpdateServer(name: String, host: String, port: Int) {
+  private func addOrUpdateServer(name: String, host: String, port: Int, serviceKey: String? = nil) {
     guard !host.isEmpty else { return }
+
+    if let serviceKey {
+      if let previous = serviceEndpoints[serviceKey],
+         previous.host != host || previous.port != port {
+        removeServer(host: previous.host, port: previous.port)
+      }
+      serviceEndpoints[serviceKey] = (host, port)
+    }
 
     let server = DiscoveredServer(name: name, host: host, port: port)
     if let index = discoveredServers.firstIndex(where: { $0.host == host && $0.port == port }) {
@@ -208,6 +248,10 @@ class HomeHubDiscovery: ObservableObject {
     }
 
     print("Found HomeHub service: \(name) at \(host):\(port)")
+  }
+
+  private func removeServer(host: String, port: Int) {
+    discoveredServers.removeAll { $0.host == host && $0.port == port }
   }
 
   private func serviceKey(for endpoint: NWEndpoint) -> String? {

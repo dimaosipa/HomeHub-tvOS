@@ -182,8 +182,7 @@ struct ServerDiscoveryView: View {
 
     Task {
       // Test connection to server
-      let baseURL = "http://\(server.host):\(server.port)"
-      let apiService = VideoAPIService(baseURL: baseURL)
+      let apiService = VideoAPIService(baseURL: server.httpBaseURL)
 
       await apiService.fetchServerInfo()
 
