@@ -187,13 +187,15 @@ struct ServerDiscoveryView: View {
       await apiService.fetchServerInfo()
 
       await MainActor.run {
-        if apiService.errorMessage == nil {
-          // Connection successful
-          onServerConnected(server)
-          addServerToRecents(server)
-          onServerConnected(server)
+        if apiService.errorMessage == nil,
+           let discovery = apiService.serverInfo?.discovery,
+           discovery.isHomeHubService {
+          let connectedServer = Self.canonicalServer(from: server, serverInfo: apiService.serverInfo)
+          onServerConnected(connectedServer)
+          addServerToRecents(connectedServer)
+        } else if apiService.errorMessage == nil {
+          connectionError = "Discovered device is not a HomeHub server"
         } else {
-          // Connection failed
           connectionError = apiService.errorMessage
         }
         isConnecting = false
@@ -227,6 +229,22 @@ struct ServerDiscoveryView: View {
 
   private func presentManualEntry() {
     showingManualEntry = true
+  }
+
+  /// Prefer the mDNS hostname and port the server reports in `/api/info` after Bonjour discovery.
+  private static func canonicalServer(from discovered: DiscoveredServer, serverInfo: ServerInfo?) -> DiscoveredServer {
+    guard let serverInfo else { return discovered }
+
+    var host = serverInfo.discovery.bonjourService
+    if host.hasSuffix(".") {
+      host.removeLast()
+    }
+
+    return DiscoveredServer(
+      name: serverInfo.server.name,
+      host: host,
+      port: serverInfo.server.port
+    )
   }
 }
 

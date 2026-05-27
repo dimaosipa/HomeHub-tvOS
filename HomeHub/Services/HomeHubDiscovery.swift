@@ -9,6 +9,21 @@ import Foundation
 import Network
 import Combine
 
+/// Bonjour contract shared with the HomeHub server (`app/utils/service_discovery.py`).
+private enum HomeHubBonjour {
+  static let serviceType = "_homehub._tcp"
+  static let domain = "local."
+
+  enum TXTKey {
+    static let displayName = "name"
+    static let port = "port"
+    static let serviceKind = "type"
+  }
+
+  /// Published in TXT by the Python server.
+  static let expectedServiceKind = "HomeHub VOD Server"
+}
+
 struct DiscoveredServer: Identifiable, Equatable, Codable, Hashable {
   let name: String
   let host: String
@@ -59,7 +74,7 @@ class HomeHubDiscovery: ObservableObject {
 
     // bonjourWithTXTRecord is required for metadata; plain .bonjour leaves metadata empty.
     browser = NWBrowser(
-      for: .bonjourWithTXTRecord(type: "_homehub._tcp", domain: "local."),
+      for: .bonjourWithTXTRecord(type: HomeHubBonjour.serviceType, domain: HomeHubBonjour.domain),
       using: parameters
     )
 
@@ -122,6 +137,7 @@ class HomeHubDiscovery: ObservableObject {
 
   private func handleBrowseResult(_ result: NWBrowser.Result) {
     let parsed = parseResult(result)
+    guard parsed.isValid else { return }
 
     let key = serviceKey(for: result.endpoint)
 
@@ -131,7 +147,12 @@ class HomeHubDiscovery: ObservableObject {
     }
 
     if case .service = result.endpoint {
-      resolveService(result, name: parsed.name, preferredPort: parsed.port, serviceKey: key)
+      resolveService(
+        result,
+        name: parsed.name,
+        txtPort: parsed.txtPort,
+        serviceKey: key
+      )
     }
   }
 
@@ -155,7 +176,7 @@ class HomeHubDiscovery: ObservableObject {
   private func resolveService(
     _ result: NWBrowser.Result,
     name: String,
-    preferredPort: Int,
+    txtPort: Int?,
     serviceKey key: String?
   ) {
     guard let key else { return }
@@ -174,7 +195,8 @@ class HomeHubDiscovery: ObservableObject {
               case .hostPort(let endpointHost, let endpointPort) = remote else { return }
 
         let host = Self.hostString(from: endpointHost)
-        let port = preferredPort != 8080 ? preferredPort : Int(endpointPort.rawValue)
+        // Server publishes port in the SRV record; TXT does not include `port`.
+        let port = txtPort ?? Int(endpointPort.rawValue)
 
         Task { @MainActor in
           self?.resolveConnections.removeValue(forKey: key)
@@ -201,32 +223,49 @@ class HomeHubDiscovery: ObservableObject {
     connection.start(queue: queue)
   }
 
-  private func parseResult(_ result: NWBrowser.Result) -> (name: String, host: String, port: Int) {
+  private func parseResult(_ result: NWBrowser.Result) -> (
+    name: String, host: String, port: Int, txtPort: Int?, isValid: Bool
+  ) {
     var name = "HomeHub Server"
     var host = ""
     var port = 8080
+    var txtPort: Int?
 
     switch result.endpoint {
     case .hostPort(let endpointHost, let endpointPort):
       host = Self.hostString(from: endpointHost)
       port = Int(endpointPort.rawValue)
     case .service(let serviceName, _, _, _):
-      name = serviceName
+      name = Self.displayName(fromServiceInstance: serviceName)
     default:
       break
     }
 
     if case .bonjour(let txtRecord) = result.metadata {
       let txtDict = parseTXTRecord(txtRecord)
-      if let serverName = txtDict["name"] {
+
+      if let kind = txtDict[HomeHubBonjour.TXTKey.serviceKind],
+         kind != HomeHubBonjour.expectedServiceKind {
+        print("Ignoring non-HomeHub Bonjour service (type=\(kind))")
+        return (name, "", port, nil, false)
+      }
+
+      if let serverName = txtDict[HomeHubBonjour.TXTKey.displayName] {
         name = serverName
       }
-      if let serverPort = txtDict["port"], let portInt = Int(serverPort) {
+      if let serverPort = txtDict[HomeHubBonjour.TXTKey.port], let portInt = Int(serverPort) {
+        txtPort = portInt
         port = portInt
       }
     }
 
-    return (name, host, port)
+    return (name, host, port, txtPort, true)
+  }
+
+  /// Fallback label before TXT resolves (e.g. `homehub` from `homehub._homehub._tcp.local.`).
+  private static func displayName(fromServiceInstance serviceName: String) -> String {
+    let label = serviceName.split(separator: ".").first.map(String.init) ?? serviceName
+    return label.replacingOccurrences(of: "-", with: " ").capitalized
   }
 
   private func addOrUpdateServer(name: String, host: String, port: Int, serviceKey: String? = nil) {

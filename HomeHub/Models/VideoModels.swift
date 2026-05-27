@@ -123,10 +123,16 @@ struct ServerInfo: Codable {
   struct Discovery: Codable {
     let bonjourService: String
     let serviceType: String
+    let serviceName: String?
 
     private enum CodingKeys: String, CodingKey {
       case bonjourService = "bonjour_service"
       case serviceType = "service_type"
+      case serviceName = "service_name"
+    }
+
+    var isHomeHubService: Bool {
+      serviceType.contains("_homehub._tcp")
     }
   }
 }
