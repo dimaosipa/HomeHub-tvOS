@@ -17,8 +17,7 @@ struct MainView: View {
   init(server: DiscoveredServer, onDisconnect: @escaping () -> Void = {}) {
     self.server = server
     self.onDisconnect = onDisconnect
-    let baseURL = "http://\(server.host):\(server.port)"
-    self._apiService = StateObject(wrappedValue: VideoAPIService(baseURL: baseURL))
+    self._apiService = StateObject(wrappedValue: VideoAPIService(baseURL: server.httpBaseURL))
   }
 
   var body: some View {
